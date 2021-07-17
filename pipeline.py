@@ -2,6 +2,7 @@ import yfinance as yf
 import numpy as np
 import scipy.stats as stats
 import pandas as pd
+from datetime import datetime
 
 class Portfolio():
     
@@ -45,6 +46,11 @@ class Portfolio():
     
     def __init__(self, tickers, **kwargs):
         self.tickers = tickers
+        self.value = kwargs.get('value', None)
+        self.stockdata = None
+        self.sim = None
+        self.weights = None
+        self.numstocks = None
         
         # initialize yfinance params
         self.start = kwargs.get('start', None)
@@ -53,42 +59,41 @@ class Portfolio():
         self.interval = kwargs.get('interval', '1mo')
         self.group_by = kwargs.get('group_by', 'ticker')
         self.auto_adjust = kwargs.get('auto_adjust', True)
-        self.prepost = kwargs.get('prepost', 'False')
+        self.prepost = kwargs.get('prepost', False)
         self.threads = kwargs.get('threads', True)
         self.proxy = kwargs.get('proxy', None)
         
     
-    def download(self, **kwargs):
+    def download(self, **kwargs):  
+        df = yf.download(tickers = ['^GSPC'] + self.tickers, start = self.start, end = self.end, period = self.period, interval = self.interval, group_by = self.group_by, auto_adjust = self.auto_adjust, prepost = self.prepost, threads = self.threads, proxy = self.proxy)
         
-        try:
-            data = yf.download(tickers = ['^GSPC'] + self.tickers, start = self.start, end = self.end, period = self.period, interval = self.interval, group_by = self.group_by, auto_adjust = self.auto_adjust, prepost = self.prepost, threads = self.threads, proxy = self.proxy)
+        # unstack dataframe for easier indexing/slicing
+        self.stockdata = df.stack(level=0).rename_axis(['Date', 'Ticker']).reset_index(level=1)
         
-        except Error as e:
-            print(e)
-            
-        return(data)
-    
-    
-    def clean_data(self, df, **kwargs):
-        minmonths = kwargs.get('minmonths', 0)
-        df = df.stack(level=0).rename_axis(['Date', 'Ticker']).reset_index(level=1)
         
+    def clean_data(self, **kwargs):     
         # filter out assets with less observations than minmonths
-        df = df.groupby('Ticker').filter(lambda x: len(x) > minmonths)
-        df = df.sort_values(by=['Date', 'Ticker'])
+        minmonths = kwargs.get('minmonths', 0)
+        df = self.stockdata.groupby('Ticker').filter(lambda x: len(x) > minmonths)
         
         # data includes current date, remove to avoid skewed data
         recent = df.index[-1] - pd.DateOffset(day = 1)
-        df = df.loc[df.index <= recent].copy()
-       
-        return(df)
-     
-    def compute_returns(self, df, **kwargs):
-        # drop columns with all NaNs, pandas ignores partial NaNs
-        pivoted = df.pivot(columns = 'Ticker', values = 'Open').dropna(axis=1, how='all')
+        self.stockdata = df.loc[df.index <= recent].copy()
+        
+    def compute_weights(self, **kwargs):      
+        returns, mktreturn, labels = self.compute_returns()
+        self.sim = self.reg_params(returns, mktreturn, labels)
+        sim_cutoff = self.cut(self.sim, mktreturn)
+        z = (sim_cutoff['beta'] / sim_cutoff['eps']) * (sim_cutoff['excess'] - sim_cutoff['C'])
+        self.weights = z.sort_values(ascending = False) / z.sum()
+            
+        
+    def compute_returns(self, **kwargs):
+        # pivot and drop columns with all NaNs, pandas ignores partial NaNs
+        pivoted = self.stockdata.pivot(columns = 'Ticker', values = 'Open').dropna(axis=1, how='all')
         
         # extract and drop market from data
-        spprices = pivoted['^GSPC'].to_numpy()
+        spprices = pivoted['^GSPC'].copy().to_numpy()
         pivoted = pivoted.drop(columns = ['^GSPC'])
         
         # convert to numpy for easier computing
@@ -100,7 +105,8 @@ class Portfolio():
         
         return(returnarr, spreturns, pivoted.columns.values)
     
-    def compute_weights(self, returns, mktreturn, labels, **kwargs):
+    
+    def reg_params(self, returns, mktreturn, labels, **kwargs):
         # compute alphas and betas by regression a stock's mean return on the market mean return
         alphas = np.zeros(returns.shape[1])
         betas = np.zeros(returns.shape[1])
@@ -113,29 +119,46 @@ class Portfolio():
             betas[i], alphas[i], r, p, se = stats.linregress(mktmatch, tnonan)
             unsyserr[i] = np.sum((tnonan - alphas[i] - betas[i]*mktmatch)**2) / (len(mktmatch) - 2)
             
-        simdf = pd.DataFrame(data = {'alpha': alphas, 'beta': betas, 'eps': unsyserr, 'rmean': returns.mean(axis=0)}, index = labels)
-        simdf['excess'] = simdf['rmean'] / simdf['beta']
-        simdf = simdf.sort_values(by=['excess'], ascending = False)
-        simdf = simdf.loc[(simdf['excess'] > 0) & (simdf['beta'] > 0)]
+        params = pd.DataFrame(data = {'alpha': alphas, 'beta': betas, 'eps': unsyserr, 'rmean': returns.mean(axis=0)}, index = labels)
+        
+        return(params)
+        
+        
+    def cut(self, sim_params, mktreturn, **kwargs):
+        
+        sim_params['excess'] = sim_params['rmean'] / sim_params['beta']
+        sim_params = sim_params.sort_values(by=['excess'], ascending = False)
+        sim_params = sim_params.loc[(sim_params['excess'] > 0) & (sim_params['beta'] > 0)]
         
         # compute C values and cutoff
-        num = simdf['rmean'] * simdf['beta'] / simdf['eps']
-        den = simdf['beta']**2 / simdf['eps']
-        simdf['C'] = mktreturn.var() * num.cumsum() / (1 + mktreturn.var() * den.cumsum())
+        num = sim_params['rmean'] * sim_params['beta'] / sim_params['eps']
+        den = sim_params['beta']**2 / sim_params['eps']
+        sim_params['C'] = mktreturn.var() * num.cumsum() / (1 + mktreturn.var() * den.cumsum())
         
-        cutoff = simdf.loc[simdf['C'] < simdf['excess']]
-        z = (cutoff['beta'] / cutoff['eps']) * (cutoff['excess'] - cutoff['C'])
+        return(sim_params.loc[sim_params['C'] < sim_params['excess']])
+    
+    
+    def plot_value(self, ticker, **kwargs):
+        plt.plot(self.stockdata.loc[self.stockdata['Ticker'] == ticker, 'Open'])
+        plt.show()
         
-        return(z.sort_values(ascending = False) / z.sum())
+        
+    def compute_numstocks(self, **kwargs):
+        today_date = datetime.today().strftime('%Y-%m-%d')
+        latest_raw = yf.download(tickers = self.weights.index.values.tolist(), start = today_date, period = self.period, interval = self.interval, group_by = self.group_by, auto_adjust = self.auto_adjust, prepost = self.prepost, threads = self.threads, proxy = self.proxy)
+        latest = latest_raw.stack(level=0).rename_axis(['Date', 'Ticker']).reset_index(level=1)
+        latest_prices = latest.set_index('Ticker', drop=True).loc[self.weights.index.values, 'Close']
+        self.numstocks = self.value*self.weights/latest_prices
+    
     
 if __name__ == '__main__':
-    ticks = pd.read_csv("nasdaq_screener.csv")['Symbol'].tolist()
-    p = Portfolio(tickers = ticks, start = '2016-06-01')
-    stockdata_raw = p.download()
-    stockdata = p.clean_data(stockdata_raw, minmonths = 36)
-    print(stockdata)
-    stockreturns, marketreturn, names = p.compute_returns(stockdata)
-    print(stockreturns, marketreturn, names)
-    x = p.compute_weights(stockreturns, marketreturn, names)
-    print(x)
+    #ticks = pd.read_csv("nasdaq_screener.csv")['Symbol'].tolist()
+    ticks = pd.read_csv("constituents_csv.csv")['Symbol'].tolist()
+    #ticks = ['AAPL', 'MSFT', 'TSLA']
+    p = Portfolio(tickers = ticks, value = 20000, start = '2016-06-01')
+    p.download()
+    p.clean_data(minmonths = 36)
+    p.compute_weights()
+    p.compute_numstocks()
+    print(p.numstocks)
         
