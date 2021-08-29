@@ -71,17 +71,19 @@ class Portfolio():
         self.stockdata = df.stack(level=0).rename_axis(['Date', 'Ticker']).reset_index(level=1)
         
         
-    def clean_data(self, **kwargs):     
+    def clean_data(self, minmonths = 0, **kwargs):     
         # filter out assets with less observations than minmonths
-        minmonths = kwargs.get('minmonths', 0)
+        #minmonths = kwargs.get('minmonths', 0)
         df = self.stockdata.groupby('Ticker').filter(lambda x: len(x) > minmonths)
         
         # data includes current date, remove to avoid skewed data
         recent = df.index[-1] - pd.DateOffset(day = 1)
         self.stockdata = df.loc[df.index <= recent].copy()
         
-    def compute_weights(self, **kwargs):      
-        returns, mktreturn, labels = self.compute_returns()
+    def compute_weights(self, **kwargs):  
+        start = kwargs.get('start', min(self.stockdata.index))
+        end = kwargs.get('end', max(self.stockdata.index))
+        returns, mktreturn, labels = self.compute_returns(start = start, end = end)
         self.sim = self.reg_params(returns, mktreturn, labels)
         sim_cutoff = self.cut(self.sim, mktreturn)
         z = (sim_cutoff['beta'] / sim_cutoff['eps']) * (sim_cutoff['excess'] - sim_cutoff['C'])
@@ -89,8 +91,12 @@ class Portfolio():
             
         
     def compute_returns(self, **kwargs):
+        start = kwargs.get('start', min(self.stockdata.index))
+        end = kwargs.get('end', max(self.stockdata.index))
+        df = self.stockdata.loc[(self.stockdata.index >= start) & (self.stockdata.index <= end)]
+
         # pivot and drop columns with all NaNs, pandas ignores partial NaNs
-        pivoted = self.stockdata.pivot(columns = 'Ticker', values = 'Open').dropna(axis=1, how='all')
+        pivoted = df.pivot(columns = 'Ticker', values = 'Open').dropna(axis=1, how='all')
         
         # extract and drop market from data
         spprices = pivoted['^GSPC'].copy().to_numpy()
@@ -152,14 +158,14 @@ class Portfolio():
     
     
 if __name__ == '__main__':
-	ticks = pd.read_csv("nasdaq_tech.csv")['Symbol'].tolist()
-	#ticks = pd.read_csv("constituents_csv.csv")['Symbol'].tolist()
-	#ticks = ['AAPL', 'MSFT', 'TSLA']
-	p = Portfolio(tickers = ticks, value = 20000, start = '2016-06-01')
-	p.download()
-	p.clean_data(minmonths = 36)
-	p.compute_weights()
-	print(p.weights)
-	p.compute_numstocks()
-	print(p.numstocks)
+    ticks = pd.read_csv("nasdaq_tech.csv")['Symbol'].tolist()
+    #ticks = pd.read_csv("constituents_csv.csv")['Symbol'].tolist()
+    #ticks = ['AAPL', 'MSFT', 'TSLA']
+    p = Portfolio(tickers = ticks, value = 20000, start = '2016-06-01')
+    p.download()
+    p.clean_data(minmonths = 36)
+    p.compute_weights()
+    print(p.weights)
+    p.compute_numstocks()
+    print(p.numstocks)
         
