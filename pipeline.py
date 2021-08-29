@@ -152,13 +152,14 @@ class Portfolio():
     
     
 if __name__ == '__main__':
-    #ticks = pd.read_csv("nasdaq_screener.csv")['Symbol'].tolist()
-    ticks = pd.read_csv("constituents_csv.csv")['Symbol'].tolist()
-    #ticks = ['AAPL', 'MSFT', 'TSLA']
-    p = Portfolio(tickers = ticks, value = 20000, start = '2016-06-01')
-    p.download()
-    p.clean_data(minmonths = 36)
-    p.compute_weights()
-    p.compute_numstocks()
-    print(p.numstocks)
+	ticks = pd.read_csv("nasdaq_tech.csv")['Symbol'].tolist()
+	#ticks = pd.read_csv("constituents_csv.csv")['Symbol'].tolist()
+	#ticks = ['AAPL', 'MSFT', 'TSLA']
+	p = Portfolio(tickers = ticks, value = 20000, start = '2016-06-01')
+	p.download()
+	p.clean_data(minmonths = 36)
+	p.compute_weights()
+	print(p.weights)
+	p.compute_numstocks()
+	print(p.numstocks)
         
